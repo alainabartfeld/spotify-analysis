@@ -29,6 +29,7 @@ data = duckdb.read_csv(Path(os.path.join(OUTPUT_DIR,combined_file_name)))
 #%%
 # Clean up the house
 ms_to_mins = 60000
+mins_to_hrs = 60
 
 base = duckdb.sql('''
         SELECT *
@@ -40,7 +41,13 @@ staging = duckdb.sql(f'''
         SELECT endTime AS end_time
             ,artistName AS artist_name
             ,trackName AS track_name
-            ,round(msPlayed / {ms_to_mins},2) AS mins_played
+            ,ROUND(msPlayed / {ms_to_mins},2) AS mins_played
+            ,ROUND(mins_played / {mins_to_hrs},2) AS hrs_played
+            ,CASE
+                WHEN LENGTH(CAST(month(end_time) AS VARCHAR))=1 THEN concat(year(end_time), '-0', month(end_time))
+                ELSE concat(year(end_time), '-',  CAST(month(end_time) AS VARCHAR))
+            END AS end_time_yyyy_mm
+            ,date(endTime) AS end_time_date
         FROM data
     '''
 )
@@ -64,10 +71,10 @@ duckdb.sql(f'''
 # Top x artists
 x = 5
 duckdb.sql(f'''
-        SELECT artist_name, round(sum(mins_played),2) AS mins_played
+        SELECT artist_name, ROUND(SUM(mins_played),2) AS mins_played
         FROM streaming_history_2025
         GROUP BY artist_name
-        ORDER BY sum(mins_played) DESC
+        ORDER BY SUM(mins_played) DESC
         LIMIT {x}
     '''
 )
@@ -76,11 +83,59 @@ duckdb.sql(f'''
 # Top y songs
 y = 20
 duckdb.sql(f'''
-            SELECT track_name, artist_name, count(*) AS number_of_streams, round(sum(mins_played),2) AS mins_played
+            SELECT track_name, artist_name, COUNT(*) AS number_of_streams, ROUND(SUM(mins_played),2) AS mins_played
             FROM streaming_history_2025
             GROUP BY track_name, artist_name
-            ORDER BY count(*) DESC
+            ORDER BY COUNT(*) DESC
             LIMIT {y}
     '''
 )
+
+# %%
+# Streaming by month and grand total
+duckdb.sql(f'''
+           WITH monthly AS (
+            SELECT DISTINCT end_time_yyyy_mm
+                , ROUND(SUM(mins_played)/60,2) AS hrs_played
+            FROM streaming_history_2025
+            GROUP BY ALL
+            ORDER BY end_time_yyyy_mm
+        )
+        , total AS (
+            SELECT 'Grand total', ROUND(SUM(mins_played)/60,2) AS hrs_played
+            FROM streaming_history_2025
+        )
+        SELECT * FROM monthly
+        UNION ALL
+        SELECT * FROM total
+    '''
+)
+
+#%%
+# Average hours listened to per day
+duckdb.sql(f'''
+        SELECT ROUND(
+                (
+                SUM(hrs_played)
+                /
+                -- get the # of days in the time period by casting the interval as a string, parsing it for the #, then casting it as an integer
+                CAST(CAST(max(end_time)-min(end_time) AS VARCHAR)[1:4] AS INT)
+                )
+            ,2) AS daily_avg_hrs_played
+        FROM streaming_history_2025
+    '''
+)
+
+#%%
+# Top z listening days
+z = 5
+duckdb.sql(f'''
+        SELECT DISTINCT end_time_date, ROUND(SUM(hrs_played),2) AS total_hrs_played
+        FROM streaming_history_2025
+        GROUP BY end_time_date
+        ORDER BY SUM(hrs_played) DESC
+        LIMIT {z}
+    '''
+)
+
 # %%
