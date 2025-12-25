@@ -139,3 +139,41 @@ duckdb.sql(f'''
 )
 
 # %%
+# Top a artists on my top listening day in terms of # of listens (not mins listened)
+a = 5
+duckdb.sql(f'''
+        SELECT artist_name, count(*)
+        FROM streaming_history_2025
+        WHERE end_time_date = (
+            SELECT DISTINCT end_time_date
+            FROM streaming_history_2025
+            GROUP BY end_time_date
+            ORDER BY SUM(hrs_played) DESC
+            LIMIT 1
+        )
+        GROUP BY artist_name
+        ORDER BY count(*) DESC
+        LIMIT {a}
+    '''
+)
+
+#%%
+# Top b songs on my top listening day in terms of # of listens (not mins listened)
+b = 5
+duckdb.sql(f'''
+        SELECT track_name, count(*)
+        FROM streaming_history_2025
+        WHERE end_time_date = (
+            SELECT DISTINCT end_time_date
+            FROM streaming_history_2025
+            GROUP BY end_time_date
+            ORDER BY SUM(hrs_played) DESC
+            LIMIT 1
+        )
+        GROUP BY track_name
+        ORDER BY count(*) DESC
+        LIMIT {b}
+    '''
+)
+
+# %%
