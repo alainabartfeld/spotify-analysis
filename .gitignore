@@ -1,0 +1,14 @@
+# Ignore all .log files
+*.log
+
+# Ignore all .csv files
+*.csv
+
+# Ignore all .pyc files
+*.pyc
+
+# Ignore all .json files
+*.json
+
+# Ignore all PDFs for some reason
+*.pdf
