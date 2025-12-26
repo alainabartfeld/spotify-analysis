@@ -16,41 +16,49 @@ logging.info("Starting Spotify Analysis Pipeline")
 # 2 index is Solomon's full listening history up until Christmas Day 2025
 
 # where the JSONs are located
-json_subpath = ["spotify_account_data_dec_2025"
-                ,"spotify_extended_streaming_history"
-                ,"solomon_spotify_extended_streaming_history"
+json_subpath = [
+    "spotify_account_data_dec_2025"
+    ,"spotify_extended_streaming_history"
+    ,"solomon_spotify_extended_streaming_history"
     ]
 
 # what to call the combined file
-combined_file_name = ["dec_2025_streaming_history_combined.csv"
-                      ,"spotify_extended_streaming_history_combined.csv"
-                      ,"solomon_spotify_extended_streaming_history_combined.csv"
+combined_file_name = [
+    "dec_2025_streaming_history_combined.csv"
+    ,"spotify_extended_streaming_history_combined.csv"
+    ,"solomon_spotify_extended_streaming_history_combined.csv"
     ]
 
-pattern = ["StreamingHistory_music*.json"
+pattern = [
+    "StreamingHistory_music*.json"
     ,"Streaming_History_Audio*"
     ]
 
-end_time_col = ["endTime"
-                ,"ts"
+end_time_col = [
+    "endTime"
+    ,"ts"
     ]
 
 # where to put the combined file (I want to put them in the same place)
 csv_subpath = "streaming_history_data"
 
-# which file from the above lists do I want to query?
-# for the file_index_level
 # indexes json_subpath and combined_file_name
-    # 0 = my subset of data
-    # 1 = my full listening history
-    # 2 = Solomon's full listening history
-# for the pattern_and_end_col_index_level
-# indexes pattern and end_time_col
-    # 0 = subset of data
-    # 1 = full listening history
-file_index_level = 2
-pattern_and_end_col_index_level = 1
+file_index_dict = {
+    "my subset of data":0
+    ,"my full listening history":1
+    ,"Solomon full listening history":2
+    }
 
+# indexes pattern and end_time_col
+pattern_and_end_col_index_dict = {
+    "subset of data":0
+    ,"full listening history":1
+}
+
+file_index_level = file_index_dict["my full listening history"]
+pattern_and_end_col_index_level = pattern_and_end_col_index_dict["full listening history"]
+
+#%%
 # Setting paths up
 DATA_DIR = my_utils.init_paths(json_subpath[file_index_level],csv_subpath)["DATA_DIR"]
 
