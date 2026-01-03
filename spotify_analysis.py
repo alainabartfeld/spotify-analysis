@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import my_utils
 import duckdb
+from jinja2 import Template
 
 #%%
 my_utils.setup_logging("spotify_analysis.log")
@@ -61,7 +62,7 @@ pattern_end_col_and_ms_played_index_dict = {
     ,"full listening history":1
 }
 
-file_index_level = file_index_dict["Solomon full listening history"]
+file_index_level = file_index_dict["my full listening history"]
 pattern_end_col_and_ms_played_index_level = pattern_end_col_and_ms_played_index_dict["full listening history"]
 
 #%%
@@ -92,6 +93,25 @@ staging = duckdb.sql(f'''
         SELECT 
             {end_time_col[pattern_end_col_and_ms_played_index_level]} AS end_time
             ,platform
+            -- standardize the platform
+            ,CASE
+                WHEN LOWER(platform) LIKE '%ios%' THEN 'iOS'
+                WHEN LOWER(platform) LIKE '%os%' THEN 'OS'
+                WHEN LOWER(platform) LIKE '%windows%' THEN 'Windows'
+                WHEN LOWER(platform) LIKE '%cast%' THEN 'Cast'                ELSE platform
+            END AS platform_standard
+
+            -- get a proxy for the listening device
+            ,CASE
+                WHEN CONTAINS(LOWER(platform), 'windows')
+                    THEN 'PC'
+                WHEN CONTAINS(platform,'(') AND NOT CONTAINS(LOWER(platform), 'windows')
+                    THEN SPLIT(SPLIT(CAST(platform AS VARCHAR),'(')[2],')')[1]
+                WHEN CONTAINS (platform, ';')
+                    THEN SPLIT(CAST(platform AS VARCHAR),';')[2]
+                ELSE platform
+            END AS device
+
             ,ROUND({ms_played_col[pattern_end_col_and_ms_played_index_level]} / {ms_to_mins},2) AS mins_played
             ,ROUND(mins_played / {mins_to_hrs},2) AS hrs_played
             ,CASE
@@ -108,34 +128,69 @@ staging = duckdb.sql(f'''
             ,episode_name
             ,episode_show_name
             ,spotify_episode_uri
-            ,audiobook_title
-            ,audiobook_uri
-            ,audiobook_chapter_uri
-            ,audiobook_chapter_title
+            
+            -- add way to differentiate btwn song and podcast records
+            ,CASE
+                WHEN spotify_track_uri IS NOT NULL THEN 'song'
+                WHEN spotify_episode_uri IS NOT NULL THEN 'podcast'
+            END AS song_podcast_flag
+            
+            -- I have never listened to an audiobook but keep them commented in case that changes
+            --,audiobook_title
+            --,audiobook_uri
+            --,audiobook_chapter_uri
+            --,audiobook_chapter_title
+            
             ,reason_start
             ,reason_end
+            
+            -- make these boolean columns summable
             ,shuffle
+            ,CASE
+                WHEN shuffle = 'TRUE' THEN 1
+                ELSE 0
+            END AS shuffle_binary
+            
             ,skipped
+            ,CASE
+                WHEN skipped = 'TRUE' THEN 1
+                ELSE 0
+            END AS skipped_binary
+            
             ,offline
+            ,CASE
+                WHEN offline = 'TRUE' THEN 1
+                ELSE 0
+            END AS offline_binary
             ,offline_timestamp
+            
             ,incognito_mode
+            ,CASE
+                WHEN incognito_mode = 'TRUE' THEN 1
+                ELSE 0
+            END AS incognito_mode_binary
         FROM base
     '''
 )
 
 songs_only = duckdb.sql(f'''
+        -- GRAIN = spotify_track_uri
         SELECT *
         FROM staging
-        WHERE track_name IS NOT NULL
+        WHERE song_podcast_flag = 'song'
     '''
 )
 
 podcasts_only = duckdb.sql(f'''
+        -- GRAIN = spotify_episode_uri
         SELECT *
         FROM staging
-        WHERE episode_name IS NOT NULL
+        WHERE song_podcast_flag = 'podcast'
     '''
 )
+
+# staging.to_csv("staging.csv")
+
 
 #%%
 # Time period per year
@@ -157,10 +212,10 @@ top_artists = duckdb.sql(f'''
         SELECT
             year(end_time) AS year
             ,artist_name
-            ,ROUND(SUM(mins_played), 2) AS mins_played
+            ,ROUND(SUM(hrs_played), 2) AS hrs_played
             ,RANK() OVER (
                 PARTITION BY year(end_time)
-                ORDER BY SUM(mins_played) DESC
+                ORDER BY SUM(hrs_played) DESC
             ) AS rnk
         FROM songs_only
         GROUP BY
@@ -171,23 +226,23 @@ top_artists = duckdb.sql(f'''
         year
         ,rnk
         ,artist_name
-        ,mins_played
+        ,hrs_played
     FROM ranked
     WHERE rnk <= {x}
     ORDER BY year, rnk
 ''')
 
-top_artists.to_csv("top_artists.csv")
+# top_artists.to_csv("top_artists.csv")
 
 #%%
 # Top x artists across all listening history
 duckdb.sql(f'''
         SELECT
             artist_name
-            ,ROUND(SUM(mins_played), 2) AS mins_played
+            ,ROUND(SUM(hrs_played), 2) AS hrs_played
         FROM songs_only
         GROUP BY ALL
-        ORDER BY SUM(mins_played) DESC
+        ORDER BY SUM(hrs_played) DESC
         LIMIT {x}
 ''')
 
@@ -200,7 +255,7 @@ top_songs = duckdb.sql(f'''
             year(end_time) AS year
             ,track_name
             ,artist_name
-            ,ROUND(SUM(mins_played), 2) AS mins_played
+            ,ROUND(SUM(hrs_played), 2) AS hrs_played
             ,COUNT(*) AS number_of_streams
             ,RANK() OVER (
                 PARTITION BY year(end_time)
@@ -209,6 +264,7 @@ top_songs = duckdb.sql(f'''
         FROM songs_only
         GROUP BY
             year(end_time)
+            ,spotify_track_uri
             ,track_name
             ,artist_name
     )
@@ -217,14 +273,15 @@ top_songs = duckdb.sql(f'''
         ,rnk
         ,track_name
         ,artist_name
-        ,mins_played
+        ,hrs_played
         ,number_of_streams
     FROM ranked
     WHERE rnk <= {y}
     ORDER BY year, rnk
 ''')
 
-top_songs.to_csv("top_songs.csv")
+# top_songs.to_csv("top_songs.csv")
+
 
 # %%
 # Top z albums per year
@@ -256,11 +313,35 @@ duckdb.sql(f'''
     ORDER BY year, rnk
 ''')
 
+
 # %%
-# Number of hours listened to per year
-# Avg number of hours listened to per day
+# Monthly listening in 2025
+duckdb.sql(f'''
+        WITH monthly AS (
+            SELECT end_time_yyyy_mm
+                ,ROUND(SUM(hrs_played),2) AS total_hrs_played
+            FROM songs_only
+            WHERE YEAR(end_time) = '2025'
+            GROUP BY end_time_yyyy_mm
+            ORDER BY end_time_yyyy_mm
+        )
+        , total AS (
+            SELECT 'Grand total'
+                ,ROUND(SUM(hrs_played),2) AS total_hrs_played
+            FROM songs_only
+            WHERE YEAR(end_time) = '2025'
+        )
+        SELECT * FROM monthly
+        UNION ALL
+        SELECT * FROM total
+    '''
+)
+
+#%%
+# # Avg number of hours listened to per day
 duckdb.sql(f'''
             SELECT DISTINCT year(end_time) AS year
+                ,ROUND(SUM(mins_played),2) AS mins_played
                 ,ROUND(SUM(hrs_played),2) AS hrs_played
                 ,ROUND(SUM(hrs_played)/365,2) AS daily_avg_hrs_played
             FROM songs_only
@@ -332,17 +413,6 @@ duckdb.sql(f'''
 )
 
 #%%
-# Hours listened per year
-duckdb.sql(f'''
-        SELECT year(end_time) AS year
-            ,ROUND(SUM(hrs_played),2)
-        FROM songs_only
-        GROUP BY ALL
-        ORDER BY year(end_time)
-    '''
-)
-
-#%%
 # Top 20 listening days across all time
 duckdb.sql(f'''
         SELECT DISTINCT end_time_date
@@ -355,8 +425,143 @@ duckdb.sql(f'''
     '''
 )
 
+#%%
+# What platform do I use most?
+duckdb.sql(f'''
+        SELECT platform_standard
+            ,ROUND(SUM(hrs_played)) AS hrs_played
+        FROM staging
+        GROUP BY ALL
+        ORDER BY hrs_played DESC
+    '''
+)
+
+#%%
+# Top devices
+duckdb.sql(f'''
+        SELECT device, ROUND(SUM(hrs_played),2) AS hrs_played
+        FROM staging
+        GROUP BY device
+        ORDER BY hrs_played desc
+    '''
+)
+
+# %%
+# How often do I shuffle, skip, lisen offline, and listen incognito per year?
+measures = [
+    'shuffle_binary'
+    ,'skipped_binary'
+    ,'offline_binary'
+    ,'incognito_mode_binary'
+]
+
+pct_sql_template = Template('''
+            SELECT     
+                YEAR(end_time) AS year,
+                -- for all the columns, get the proportion, round it to 2 decimals, then add the percentage sign at the end
+                {% for col in measures %}
+                CONCAT(CAST(
+                        ROUND(
+                            (SUM({{ col }})/COUNT(*))*100,2)
+                        AS VARCHAR
+                    ),'%') 
+                AS {{ col }}_pct
+                    {% if not loop.last %}
+                    ,
+                    {% endif %}
+                {% endfor %}
+            FROM staging
+            GROUP BY YEAR(end_time)
+            ORDER BY YEAR(end_time)
+        '''
+    )
+ 
+duckdb.sql(pct_sql_template.render(measures=measures))
+
+# %%
+# Top a podcasts per year
+a = 5
+top_podcasts = duckdb.sql(f'''
+    WITH ranked AS (
+        SELECT
+            year(end_time) AS year
+            ,episode_show_name
+            ,ROUND(SUM(hrs_played), 2) AS hrs_played
+            ,RANK() OVER (
+                PARTITION BY year(end_time)
+                ORDER BY SUM(hrs_played) DESC
+            ) AS rnk
+        FROM podcasts_only
+        GROUP BY
+            year(end_time)
+            ,episode_show_name
+    )
+    SELECT
+        year
+        ,rnk
+        ,episode_show_name
+        ,hrs_played
+    FROM ranked
+    WHERE rnk <= {a}
+    ORDER BY year, rnk
+''')
+
+# top_podcasts.to_csv("top_podcasts.csv")
+
 # %%
 # Number of mins/hours of podcasts per year
-    # 2025 = 1289 mins (BAES #1)
+duckdb.sql(f'''
+            SELECT YEAR(end_time) AS year
+                ,ROUND(SUM(hrs_played),2) AS hrs_played
+                ,ROUND(SUM(mins_played),2) AS mins_played
+            FROM podcasts_only
+            GROUP BY year,song_podcast_flag
+            ORDER BY year
+    '''
+)
 
-# How often do I shuffle or skip?
+# %%
+# What percentage of podcasts vs. music have I listened to and how has that changed over time?
+# Would be interesting to incorporate Libby listening data to this
+duckdb.sql(f'''
+        WITH pods AS (
+            SELECT YEAR(end_time) AS year
+                ,ROUND(SUM(hrs_played),2) AS hrs_played
+                ,ROUND(SUM(mins_played),2) AS mins_played
+            FROM podcasts_only
+            GROUP BY year
+        )
+        ,music AS (
+            SELECT YEAR(end_time) AS year
+                ,ROUND(SUM(hrs_played),2) AS hrs_played
+                ,ROUND(SUM(mins_played),2) AS mins_played
+            FROM songs_only
+            GROUP BY year
+        )
+        ,total AS (
+            SELECT YEAR(end_time) AS year
+                ,ROUND(SUM(hrs_played),2) AS hrs_played
+                ,ROUND(SUM(mins_played),2) AS mins_played
+            FROM staging
+            GROUP BY year
+        )
+        ,joined AS (
+            SELECT pods.year
+                ,pods.hrs_played AS pod_hrs
+                -- ,pods.mins_played AS pod_mins
+                ,music.hrs_played AS music_hrs
+                -- ,music.mins_played AS music_mins
+                ,total.hrs_played AS total_hrs
+            FROM pods
+            LEFT JOIN music ON pods.year = music.year
+            LEFT JOIN total ON pods.year = total.year
+        )
+        SELECT
+            year
+            ,CONCAT(CAST(ROUND((music_hrs / total_hrs)*100,2) AS VARCHAR),'%') AS music_pct
+            ,CONCAT(CAST(ROUND((pod_hrs / total_hrs)*100,2) AS VARCHAR),'%') AS pod_pct
+        FROM joined
+        ORDER BY year
+    '''
+)
+# %%
